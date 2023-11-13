@@ -1,0 +1,251 @@
+<template>
+  <ModalWrapper :is-open="isOpen" @close="close()">
+    <div data-test="links-modal" class="max-w-xl">
+      <div class="mb-[-14px] flex justify-between">
+        <h1
+          class="my-auto font-nunito text-xl text-gray-900 dark:text-gray-200"
+        >
+          Active Links
+        </h1>
+
+        <div>
+          <Button
+            v-slot="slotProps"
+            button-type="secondary"
+            shape="rectangular"
+            :size="mq.smMinus ? 'small' : 'medium'"
+            icon-position="leading"
+            data-test="create-link-button"
+            @click="createNewLink()"
+          >
+            <PlusIcon
+              :class="slotProps.iconClasses"
+              class="-ml-1"
+              aria-hidden="true"
+            />
+            New Link
+          </Button>
+        </div>
+      </div>
+
+      <div class="mt-8 space-y-6">
+        <div
+          v-if="links.length > 0"
+          role="list"
+          data-test="links-container"
+          class="divide-y divide-gray-300 rounded-lg border border-gray-300 dark:divide-gray-600 dark:border-gray-600"
+        >
+          <PrivateShareModalListItem
+            v-for="link in links"
+            :key="link.linkCode"
+            :link="link"
+            :shared-item="(sharedItem as T)"
+          />
+        </div>
+
+        <div
+          v-else-if="areLinksLoaded && links.length === 0"
+          class="text-gray-800 dark:text-gray-400"
+        >
+          There are no links for this {{ getSharedItemType }}!
+        </div>
+        <div class="flex justify-end">
+          <Button
+            data-test="links-modal-close-button"
+            button-type="default"
+            @click="close()"
+          >
+            Close
+          </Button>
+        </div>
+      </div>
+    </div>
+    <UpsertPrivateShareModal
+      v-if="currentLinkCode !== null"
+      :is-open="showUpsertPrivateShareModal"
+      :is-public="false"
+      :shared-item="(sharedItem as T)"
+      @close="closeUpsertPrivateShareModal"
+    />
+  </ModalWrapper>
+</template>
+
+<script setup lang="ts" generic="T extends TonicAPI.Product | TonicAPI.Take">
+import { computed, ref, watch } from 'vue'
+import ModalWrapper from '@/components/modals/ModalWrapper.vue'
+import Button from '@/components/elements/Button.vue'
+import { PlusIcon } from '@heroicons/vue/20/solid'
+
+import UpsertPrivateShareModal from '@/components/modals/PrivateShare/UpsertPrivateShareModal.vue'
+import { apiGet } from '@/hooks/tonicApi'
+import { useAuth } from '@/auth'
+import { useSocket } from '@/hooks/socket'
+import { useMq } from 'vue3-mq'
+import PrivateShareModalListItem from '@/components/modals/PrivateShare/PrivateShareModalListItem.vue'
+
+const $auth = useAuth()
+const links = ref<TonicAPI.PrivateShare[]>([])
+const showUpsertPrivateShareModal = ref(false)
+const { $socket, socketKey } = useSocket('PrivateShareModal')
+const mq = useMq()
+
+const props = withDefaults(
+  defineProps<{
+    isOpen: boolean
+    sharedItem: T
+  }>(),
+  {},
+)
+
+watch(
+  () => props.isOpen,
+  () => {
+    fetchLinks(25, undefined)
+  },
+)
+
+const currentLinkCode = ref<string | null>(null)
+const areLinksLoaded = ref<boolean>(false)
+const apiStatusLinks = ref<number>()
+const apiError = ref()
+
+const getSharedItemId = computed(() => {
+  if (props.sharedItem) {
+    return 'takeId' in props.sharedItem
+      ? props.sharedItem.takeId
+      : props.sharedItem.productId
+  } else {
+    return undefined
+  }
+})
+
+const getSharedItemType = computed(() => {
+  if (props.sharedItem) {
+    return 'takeId' in props.sharedItem ? 'take' : 'product'
+  } else {
+    return undefined
+  }
+})
+
+function getLinkItemId(linkItem?: T) {
+  if (linkItem) {
+    return 'takeId' in linkItem ? linkItem.takeId : linkItem.productId
+  } else {
+    return undefined
+  }
+}
+
+async function fetchLinks(take: number, cursor?: string) {
+  let cursorQuery = undefined
+
+  if (cursor !== undefined) {
+    cursorQuery = `&cursor=${cursor}`
+  } else {
+    cursorQuery = ''
+  }
+
+  areLinksLoaded.value = false
+  const result = await apiGet(
+    `/${getSharedItemType.value}/${getSharedItemId.value}/links?take=${take}${cursorQuery}`,
+    await $auth.getTokenSilently(),
+  )
+
+  if (result && result.status < 400) {
+    areLinksLoaded.value = true
+    apiStatusLinks.value = result.status
+    links.value = result.data as TonicAPI.PrivateShare[]
+  } else {
+    apiError.value = result.data as APIError
+    console.error(apiError.value)
+  }
+}
+
+function createNewLink() {
+  currentLinkCode.value = ''
+  showUpsertPrivateShareModal.value = true
+}
+
+function closeUpsertPrivateShareModal() {
+  showUpsertPrivateShareModal.value = false
+
+  // put this in a timeout so we don't short-circuit the modal transition on close
+  setTimeout(() => {
+    currentLinkCode.value = null
+  }, 1000)
+}
+
+$socket.on(
+  'privateshare:created',
+  socketKey,
+  function (link: TonicAPI.PrivateShare) {
+    if (
+      link &&
+      getSharedItemType.value &&
+      getLinkItemId(link?.[getSharedItemType.value] as T) ===
+        getSharedItemId.value
+    ) {
+      spliceInvitesWithIncomingInvite('add', link)
+    }
+  },
+)
+
+$socket.on(
+  'privateshare:updated',
+  socketKey,
+  function (link: TonicAPI.PrivateShare) {
+    if (
+      link &&
+      getSharedItemType.value &&
+      getLinkItemId(link?.[getSharedItemType.value] as T) ===
+        getSharedItemId.value
+    ) {
+      spliceInvitesWithIncomingInvite('update', link)
+    }
+  },
+)
+
+$socket.on(
+  'privateshare:deleted',
+  socketKey,
+  function (link: TonicAPI.PrivateShare) {
+    if (
+      link &&
+      getSharedItemType.value &&
+      getLinkItemId(link?.[getSharedItemType.value] as T) ===
+        getSharedItemId.value
+    ) {
+      spliceInvitesWithIncomingInvite('delete', link)
+    }
+  },
+)
+function spliceInvitesWithIncomingInvite(
+  type: 'add' | 'update' | 'delete',
+  link: TonicAPI.PrivateShare,
+) {
+  // First, find the index of the updated message in our current array
+  const index = links.value?.findIndex(
+    (e: TonicAPI.PrivateShare) => e.linkCode === link.linkCode,
+  )
+  // if found, update, or delete it by splicing it reactively:
+  // https://vuejs.org/guide/essentials/list.html#array-change-detection
+  if (index !== -1) {
+    if (type === 'update') {
+      links.value.splice(index, 1, link)
+    } else {
+      links.value.splice(index, 1)
+    }
+  }
+  // if not found, add it
+  if (index === -1) {
+    if (type === 'add') {
+      links.value.unshift(link)
+    }
+  }
+}
+
+const emit = defineEmits(['close'])
+
+function close() {
+  emit('close')
+}
+</script>
